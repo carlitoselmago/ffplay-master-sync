@@ -42,13 +42,21 @@ class FFPlaySyncMaster():
         return None
 
     def stderr_reader(self):
-        for line in self.process.stderr:
-            if not self.running:
+        buf = b''
+        while self.running:
+            ch = self.process.stderr.read(1)
+            if not ch:
                 break
-            t = self.parse_time(line.decode('utf-8', errors='ignore'))
-            if t is not None:
-                with self.lock:
-                    self.position = t
+            if ch in (b'\r', b'\n'):
+                line = buf.decode('utf-8', errors='ignore').strip()
+                if line:
+                    t = self.parse_time(line)
+                    if t is not None:
+                        with self.lock:
+                            self.position = t
+                buf = b''
+            else:
+                buf += ch
 
     def broadcast_position(self):
         while self.running:
