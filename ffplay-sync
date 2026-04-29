@@ -36,11 +36,9 @@ class FFPlaySyncMaster():
         signal.signal(signal.SIGTERM, self.shutdown)
 
     def parse_time(self, line):
-        # ffplay stderr: ... time=00:00:02.00 ...
-        match = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
+        match = re.match(r'^\s*(\d+\.\d+)\s+A-V:', line)
         if match:
-            h, m, s = match.groups()
-            return int(h) * 3600 + int(m) * 60 + float(s)
+            return float(match.group(1))
         return None
 
     def stderr_reader(self):
