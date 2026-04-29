@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+#
+# ffplay-sync-master
+#
+# Broadcasts playback position over UDP compatible with omxplayer-sync slaves.
+# Requires ffplay with rkmpp support (Orange Pi / RK3588).
+#
+
+import os
+import re
+import sys
+import socket
+import signal
+import threading
+from time import sleep, time
+from subprocess import Popen, PIPE, DEVNULL
+from optparse import OptionParser
+
+PORT = 1666
+BROADCAST_ADDR = '255.255.255.255'
+FFPLAY = 'ffplay'
+
+class FFPlaySyncMaster():
+    def __init__(self):
+        self.position = 0.0
+        self.filename = ''
+        self.process = None
+        self.running = True
+        self.lock = threading.Lock()
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock.connect((BROADCAST_ADDR, PORT))
+
+        signal.signal(signal.SIGINT, self.shutdown)
+        signal.signal(signal.SIGTERM, self.shutdown)
+
+    def parse_time(self, line):
+        # ffplay stderr: ... time=00:00:02.00 ...
+        match = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
+        if match:
+            h, m, s = match.groups()
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        return None
+
+    def stderr_reader(self):
+        for line in self.process.stderr:
+            if not self.running:
+                break
+            t = self.parse_time(line.decode('utf-8', errors='ignore'))
+            if t is not None:
+                with self.lock:
+                    self.position = t
+
+    def broadcast_position(self):
+        while self.running:
+            with self.lock:
+                pos = self.position
+                fn = self.filename
+            try:
+                msg = ("%s%%%s" % (str(pos), fn)).encode('utf-8')
+                self.sock.send(msg)
+                if self.options.verbose:
+                    print("broadcast: %.2f %s" % (pos, fn))
+            except socket.error as e:
+                print("socket error:", e)
+            sleep(1)
+
+    def play_file(self, filename):
+        self.filename = os.path.abspath(filename)
+
+        cmd = [FFPLAY]
+
+        if self.options.codec:
+            cmd += ['-vcodec', self.options.codec]
+
+        if self.options.fullscreen:
+            cmd += ['-fs']
+
+        if self.options.loop:
+            cmd += ['-loop', '0']
+
+        # display target
+        env = os.environ.copy()
+        if self.options.wayland:
+            env['WAYLAND_DISPLAY'] = self.options.wayland
+            env['XDG_RUNTIME_DIR'] = '/run/user/%d' % os.getuid()
+        elif self.options.display:
+            env['DISPLAY'] = self.options.display
+
+        cmd += [filename]
+
+        if self.options.verbose:
+            print("launching:", ' '.join(cmd))
+
+        self.process = Popen(
+            cmd,
+            stdout=DEVNULL,
+            stderr=PIPE,
+            stdin=DEVNULL,
+            env=env
+        )
+
+        reader_thread = threading.Thread(target=self.stderr_reader, daemon=True)
+        reader_thread.start()
+
+        broadcast_thread = threading.Thread(target=self.broadcast_position, daemon=True)
+        broadcast_thread.start()
+
+        self.process.wait()
+        self.running = False
+
+    def run(self):
+        p = OptionParser(usage="usage: %prog [options] filename")
+        p.add_option('--codec', '-c', default='hevc_rkmpp',
+                     help="ffplay video codec (default: hevc_rkmpp)")
+        p.add_option('--fullscreen', '-f', action='store_true',
+                     help="fullscreen playback")
+        p.add_option('--loop', '-u', action='store_true',
+                     help="loop video")
+        p.add_option('--wayland', '-w', default='wayland-0',
+                     help="Wayland display (default: wayland-0)")
+        p.add_option('--display', '-d', default=None,
+                     help="X11 display (e.g. :0), overrides wayland")
+        p.add_option('--verbose', '-v', action='store_true',
+                     help="verbose output")
+
+        self.options, args = p.parse_args()
+
+        if not args:
+            print("ERROR: no filename specified")
+            p.print_help()
+            sys.exit(1)
+
+        filename = args[0]
+        if not os.path.isfile(filename):
+            print("ERROR: file not found: %s" % filename)
+            sys.exit(1)
+
+        self.play_file(filename)
+
+    def shutdown(self, *args):
+        self.running = False
+        if self.process:
+            try:
+                self.process.terminate()
+            except:
+                pass
+        sys.exit(0)
+
+if __name__ == '__main__':
+    FFPlaySyncMaster().run()
