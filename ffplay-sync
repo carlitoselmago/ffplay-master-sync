@@ -62,7 +62,7 @@ class FFPlaySyncMaster():
         while self.running:
             with self.lock:
                 pos = self.position
-                fn = self.filename
+                fn = os.path.basename(self.filename)
             try:
                 msg = ("%s%%%s" % (str(pos), fn)).encode('utf-8')
                 self.sock.send(msg)
